@@ -6,6 +6,7 @@
 #include <QCursor>
 #include <QDialogButtonBox>
 #include <QEvent>
+#include <QLineF>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
@@ -23,6 +24,9 @@ constexpr int kHoldMs       = 1000; // keep a radio/check selected for 1 s
 constexpr int kGapMs        = 300;  // pause between widgets
 constexpr int kKeyMs        = 500;  // 0.5 s between keystrokes / backspaces
 constexpr int kCursorPollMs = 30;   // hardware-cursor polling in CONTROL
+constexpr int kGlideTickMs  = 8;    // cursor glide update interval
+constexpr int kGlideMinMs   = 250;  // glide duration bounds (scaled by distance)
+constexpr int kGlideMaxMs   = 800;
 constexpr int kTypeCount    = 15;
 constexpr char kSample[]    = "HelloFromQTest!";
 static_assert(sizeof(kSample) - 1 == kTypeCount, "sample text must be 15 chars");
@@ -38,15 +42,6 @@ QPoint indicatorPoint(QAbstractButton *b)
                                                     : QStyle::SE_CheckBoxIndicator;
     const QRect r = b->style()->subElementRect(se, &opt, b);
     return r.isValid() ? r.center() : QPoint(8, b->height() / 2);
-}
-
-// Move the real OS cursor onto the widget, then click there with QTest.
-// (QTest alone only posts synthetic events; it never moves the cursor.)
-// Note: QCursor::setPos is a no-op on Wayland; use X11/XWayland there.
-void clickWithCursor(QWidget *w, const QPoint &pos)
-{
-    QCursor::setPos(w->mapToGlobal(pos));
-    QTest::mouseClick(w, Qt::LeftButton, {}, pos);
 }
 } // namespace
 
@@ -140,16 +135,20 @@ void AutomationDialog::buildSteps()
 {
     // Radio buttons: select, hold 1 s, unselect.
     for (QRadioButton *rb : m_radios) {
-        m_steps.push_back({[rb] {
+        m_steps.push_back({[this, rb] {
             rb->setFocus(Qt::OtherFocusReason);
-            clickWithCursor(rb, indicatorPoint(rb));
+            if (!glideCursorTo(rb, indicatorPoint(rb)))
+                return false;
+            QTest::mouseClick(rb, Qt::LeftButton, {}, indicatorPoint(rb));
             return true;
         }, kHoldMs});
         // An exclusive group refuses to uncheck its checked button,
         // so relax exclusivity just for the unselect click.
         m_steps.push_back({[this, rb] {
+            if (!glideCursorTo(rb, indicatorPoint(rb)))
+                return false;
             m_radioGroup->setExclusive(false);
-            clickWithCursor(rb, indicatorPoint(rb));
+            QTest::mouseClick(rb, Qt::LeftButton, {}, indicatorPoint(rb));
             m_radioGroup->setExclusive(true);
             return true;
         }, kGapMs});
@@ -158,9 +157,11 @@ void AutomationDialog::buildSteps()
     // Check boxes: check, hold 1 s, uncheck.
     for (QCheckBox *cb : m_checks) {
         for (int delay : {kHoldMs, kGapMs}) {
-            m_steps.push_back({[cb] {
+            m_steps.push_back({[this, cb] {
                 cb->setFocus(Qt::OtherFocusReason);
-                clickWithCursor(cb, indicatorPoint(cb));
+                if (!glideCursorTo(cb, indicatorPoint(cb)))
+                    return false;
+                QTest::mouseClick(cb, Qt::LeftButton, {}, indicatorPoint(cb));
                 return true;
             }, delay});
         }
@@ -168,8 +169,10 @@ void AutomationDialog::buildSteps()
 
     // Text fields: type 15 chars (0.5 s apart), then backspace until empty.
     for (QLineEdit *le : m_edits) {
-        m_steps.push_back({[le] {
-            clickWithCursor(le, le->rect().center());
+        m_steps.push_back({[this, le] {
+            if (!glideCursorTo(le, le->rect().center()))
+                return false;
+            QTest::mouseClick(le, Qt::LeftButton, {}, le->rect().center());
             le->setFocus(Qt::OtherFocusReason);
             le->end(false);
             return true;
@@ -224,6 +227,30 @@ void AutomationDialog::runStep()
     if (finished)
         m_index = (m_index + 1) % m_steps.size(); // loop forever while in YIELD
     m_stepTimer->start(delay);
+}
+
+// Glide the real OS cursor onto the widget with an ease-in-out curve.
+// Returns false if automation was interrupted (CONTROL taken / dialog closed)
+// before arriving, in which case the caller must not click.
+// Note: QCursor::setPos is a no-op on Wayland; use X11/XWayland there.
+bool AutomationDialog::glideCursorTo(QWidget *w, const QPoint &pos)
+{
+    const QPoint from = QCursor::pos();
+    const QPoint to = w->mapToGlobal(pos);
+    const qreal dist = QLineF(from, to).length();
+    const int duration = qBound(kGlideMinMs, int(dist * 0.8), kGlideMaxMs);
+    const int ticks = qMax(1, duration / kGlideTickMs);
+
+    for (int i = 1; i <= ticks; ++i) {
+        const qreal t = qreal(i) / ticks;
+        const qreal e = t * t * (3 - 2 * t); // smoothstep
+        QCursor::setPos(from + (to - from) * e);
+        QTest::qWait(kGlideTickMs);          // keeps the UI responsive
+        if (!m_running || m_state != State::Yield)
+            return false;
+    }
+    QCursor::setPos(to);
+    return true;
 }
 
 void AutomationDialog::pollCursor()

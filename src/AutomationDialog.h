@@ -11,6 +11,7 @@ class QLabel;
 class QLineEdit;
 class QRadioButton;
 class QTimer;
+class QWidget;
 
 // Modal dialog that runs a two-state machine:
 //   YIELD   (initial) : QTest drives the widgets automatically.
@@ -51,6 +52,7 @@ private:
     void setState(State s);
     void runStep();
     void pollCursor();
+    bool glideCursorTo(QWidget *w, const QPoint &pos);
 
     State m_state = State::Control;
     bool m_running = false;
