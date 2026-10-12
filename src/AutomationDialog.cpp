@@ -39,6 +39,15 @@ QPoint indicatorPoint(QAbstractButton *b)
     const QRect r = b->style()->subElementRect(se, &opt, b);
     return r.isValid() ? r.center() : QPoint(8, b->height() / 2);
 }
+
+// Move the real OS cursor onto the widget, then click there with QTest.
+// (QTest alone only posts synthetic events; it never moves the cursor.)
+// Note: QCursor::setPos is a no-op on Wayland; use X11/XWayland there.
+void clickWithCursor(QWidget *w, const QPoint &pos)
+{
+    QCursor::setPos(w->mapToGlobal(pos));
+    QTest::mouseClick(w, Qt::LeftButton, {}, pos);
+}
 } // namespace
 
 AutomationDialog::AutomationDialog(QWidget *parent)
@@ -133,14 +142,14 @@ void AutomationDialog::buildSteps()
     for (QRadioButton *rb : m_radios) {
         m_steps.push_back({[rb] {
             rb->setFocus(Qt::OtherFocusReason);
-            QTest::mouseClick(rb, Qt::LeftButton, {}, indicatorPoint(rb));
+            clickWithCursor(rb, indicatorPoint(rb));
             return true;
         }, kHoldMs});
         // An exclusive group refuses to uncheck its checked button,
         // so relax exclusivity just for the unselect click.
         m_steps.push_back({[this, rb] {
             m_radioGroup->setExclusive(false);
-            QTest::mouseClick(rb, Qt::LeftButton, {}, indicatorPoint(rb));
+            clickWithCursor(rb, indicatorPoint(rb));
             m_radioGroup->setExclusive(true);
             return true;
         }, kGapMs});
@@ -151,7 +160,7 @@ void AutomationDialog::buildSteps()
         for (int delay : {kHoldMs, kGapMs}) {
             m_steps.push_back({[cb] {
                 cb->setFocus(Qt::OtherFocusReason);
-                QTest::mouseClick(cb, Qt::LeftButton, {}, indicatorPoint(cb));
+                clickWithCursor(cb, indicatorPoint(cb));
                 return true;
             }, delay});
         }
@@ -160,7 +169,7 @@ void AutomationDialog::buildSteps()
     // Text fields: type 15 chars (0.5 s apart), then backspace until empty.
     for (QLineEdit *le : m_edits) {
         m_steps.push_back({[le] {
-            QTest::mouseClick(le, Qt::LeftButton);
+            clickWithCursor(le, le->rect().center());
             le->setFocus(Qt::OtherFocusReason);
             le->end(false);
             return true;
